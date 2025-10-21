@@ -7,7 +7,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="apple-mobile-web-app-title" content="Task Manager">
-    <meta name="description" content="Hierarchical task manager with time tracking">
+    <meta name="description" content="Hierarchical task manager with time tracking and cross-device sync">
     
     <title>Hierarchical Task Manager</title>
     
@@ -19,18 +19,52 @@
     
     <link rel="manifest" href="#" id="manifest-placeholder">
     
+    <!-- React -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase -->
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
 
-        // Lucide icons as inline SVG components
+        // ==================== FIREBASE CONFIG ====================
+        // 🔥 REPLACE THIS WITH YOUR FIREBASE CONFIG
+        const firebaseConfig = {
+            apiKey: "AIzaSyBtEdPG8JSHVmgLPA3TAXPImBDn-gwnHgI",
+			authDomain: "claude-task-85dcc.firebaseapp.com",
+			databaseURL: "https://claude-task-85dcc-default-rtdb.firebaseio.com",
+			projectId: "claude-task-85dcc",
+			storageBucket: "claude-task-85dcc.firebasestorage.app",
+			messagingSenderId: "597445015843",
+			appId: "1:597445015843:web:9f175f11fe678128aef496"
+        };
+
+        // Check if Firebase is configured
+        const isFirebaseConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY_HERE";
+
+        // Initialize Firebase only if configured
+        let database = null;
+        if (isFirebaseConfigured) {
+            try {
+                firebase.initializeApp(firebaseConfig);
+                database = firebase.database();
+                console.log('🔥 Firebase initialized successfully');
+            } catch (error) {
+                console.error('❌ Firebase initialization error:', error);
+            }
+        } else {
+            console.warn('⚠️ Firebase not configured - using localStorage only');
+        }
+
+        // ==================== ICONS ====================
         const ChevronRight = ({ size = 24, className = "" }) => (
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
                 <polyline points="9 18 15 12 9 6"></polyline>
@@ -82,6 +116,20 @@
             </svg>
         );
 
+        const Cloud = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path>
+            </svg>
+        );
+
+        const CloudOff = ({ size = 24, className = "" }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                <path d="M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3"></path>
+                <line x1="1" y1="1" x2="23" y2="23"></line>
+            </svg>
+        );
+
+        // ==================== MAIN COMPONENT ====================
         const HierarchicalTaskManager = () => {
             const defaultTasks = [
                 {
@@ -117,55 +165,121 @@
                 }
             ];
 
-            // Check if localStorage is available
-            const isLocalStorageAvailable = () => {
-                try {
-                    const test = '__localStorage_test__';
-                    localStorage.setItem(test, test);
-                    localStorage.removeItem(test);
-                    return true;
-                } catch (e) {
-                    return false;
-                }
-            };
-
-            const hasStorage = isLocalStorageAvailable();
-
-            // Load tasks from localStorage or use defaults
-            const loadTasks = () => {
-                if (!hasStorage) return defaultTasks;
-                try {
-                    const saved = localStorage.getItem('hierarchicalTasks');
-                    return saved ? JSON.parse(saved) : defaultTasks;
-                } catch (e) {
-                    return defaultTasks;
-                }
-            };
-
-            const loadNextId = () => {
-                if (!hasStorage) return 8;
-                try {
-                    const saved = localStorage.getItem('hierarchicalTasksNextId');
-                    return saved ? parseInt(saved) : 8;
-                } catch (e) {
-                    return 8;
-                }
-            };
-
-            const [tasks, setTasks] = useState(loadTasks);
-            const [nextId, setNextId] = useState(loadNextId);
+            const [tasks, setTasks] = useState(defaultTasks);
+            const [nextId, setNextId] = useState(8);
             const [saveNotification, setSaveNotification] = useState(false);
             const [installPrompt, setInstallPrompt] = useState(null);
             const [isInstalled, setIsInstalled] = useState(false);
+            const [syncStatus, setSyncStatus] = useState('offline'); // 'syncing', 'synced', 'offline', 'error'
+            const [isLoading, setIsLoading] = useState(true);
+            const isSyncing = useRef(false);
 
-            // Check if app is installed
+            // ==================== FIREBASE FUNCTIONS ====================
+            
+            // Load data from Firebase
+            const loadFromFirebase = async () => {
+                if (!database) {
+                    console.log('📂 Firebase not available, using defaults');
+                    setIsLoading(false);
+                    return;
+                }
+
+                try {
+                    setSyncStatus('syncing');
+                    const snapshot = await database.ref('tasks').once('value');
+                    const data = snapshot.val();
+                    
+                    if (data && data.tasks && Array.isArray(data.tasks)) {
+                        console.log('✅ Loaded', data.tasks.length, 'tasks from Firebase');
+                        setTasks(data.tasks);
+                        setNextId(data.nextId || 8);
+                    } else {
+                        console.log('📝 No data in Firebase, using defaults');
+                        // Save defaults to Firebase
+                        await saveToFirebase(defaultTasks, 8);
+                    }
+                    setSyncStatus('synced');
+                } catch (error) {
+                    console.error('❌ Error loading from Firebase:', error);
+                    setSyncStatus('error');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            // Save data to Firebase
+            const saveToFirebase = async (tasksData, nextIdData) => {
+                if (!database || isSyncing.current) return;
+
+                try {
+                    isSyncing.current = true;
+                    setSyncStatus('syncing');
+                    
+                    await database.ref('tasks').set({
+                        tasks: tasksData,
+                        nextId: nextIdData,
+                        lastModified: Date.now()
+                    });
+                    
+                    console.log('💾 Saved to Firebase:', tasksData.length, 'tasks');
+                    setSyncStatus('synced');
+                    
+                    // Show save notification
+                    setSaveNotification(true);
+                    setTimeout(() => setSaveNotification(false), 2000);
+                } catch (error) {
+                    console.error('❌ Error saving to Firebase:', error);
+                    setSyncStatus('error');
+                } finally {
+                    isSyncing.current = false;
+                }
+            };
+
+            // Listen for real-time updates
+            useEffect(() => {
+                if (!database) return;
+
+                const tasksRef = database.ref('tasks');
+                
+                const handleUpdate = (snapshot) => {
+                    const data = snapshot.val();
+                    if (data && data.tasks && !isSyncing.current) {
+                        console.log('🔄 Real-time update received');
+                        setTasks(data.tasks);
+                        setNextId(data.nextId || 8);
+                        setSyncStatus('synced');
+                    }
+                };
+
+                tasksRef.on('value', handleUpdate);
+
+                return () => tasksRef.off('value', handleUpdate);
+            }, []);
+
+            // Initial load
+            useEffect(() => {
+                loadFromFirebase();
+            }, []);
+
+            // Auto-save to Firebase when tasks change
+            useEffect(() => {
+                if (isLoading) return; // Don't save during initial load
+                
+                const timeoutId = setTimeout(() => {
+                    saveToFirebase(tasks, nextId);
+                }, 500); // Debounce saves by 500ms
+
+                return () => clearTimeout(timeoutId);
+            }, [tasks, nextId, isLoading]);
+
+            // ==================== PWA SETUP ====================
+            
             useEffect(() => {
                 if (window.matchMedia('(display-mode: standalone)').matches) {
                     setIsInstalled(true);
                 }
             }, []);
 
-            // Handle install prompt
             useEffect(() => {
                 const handler = (e) => {
                     e.preventDefault();
@@ -184,27 +298,10 @@
                 }
             };
 
-            // Save to localStorage whenever tasks change (only if available)
-            useEffect(() => {
-                if (!hasStorage) return;
-                
-                try {
-                    localStorage.setItem('hierarchicalTasks', JSON.stringify(tasks));
-                    localStorage.setItem('hierarchicalTasksNextId', nextId.toString());
-                    
-                    // Show save notification
-                    setSaveNotification(true);
-                    const timer = setTimeout(() => setSaveNotification(false), 2000);
-                    return () => clearTimeout(timer);
-                } catch (e) {
-                    console.error('Failed to save to localStorage:', e);
-                }
-            }, [tasks, nextId]);
+            // ==================== TASK FUNCTIONS ====================
 
-            // Calculate total time for a task including all subtasks
             const calculateTotalTime = (task) => {
                 if (!task || typeof task !== 'object') {
-                    console.error('Invalid task in calculateTotalTime');
                     return 0;
                 }
                 
@@ -221,7 +318,6 @@
                 return taskTime + childrenTime;
             };
 
-            // Format minutes to hours and minutes
             const formatTime = (minutes) => {
                 if (minutes === 0) return '0m';
                 const hours = Math.floor(minutes / 60);
@@ -231,9 +327,7 @@
                 return `${hours}h ${mins}m`;
             };
 
-            // Add a new task
             const addTask = (parentTask = null) => {
-                // Safety check: ensure parent has valid structure
                 if (parentTask && (!parentTask.children || !Array.isArray(parentTask.children))) {
                     console.error('Parent task has invalid children structure');
                     return;
@@ -263,16 +357,13 @@
                 }
             };
 
-            // Update task recursively
             const updateTaskRecursive = (taskArray, taskId, updateFn) => {
                 if (!Array.isArray(taskArray)) {
-                    console.error('Invalid task array in updateTaskRecursive');
                     return [];
                 }
                 
                 return taskArray.map(task => {
                     if (!task || typeof task !== 'object') {
-                        console.error('Invalid task object');
                         return task;
                     }
                     
@@ -291,10 +382,8 @@
                 });
             };
 
-            // Delete task recursively (helper function)
             const deleteTaskRecursive = (taskArray, taskId) => {
                 if (!Array.isArray(taskArray)) {
-                    console.error('Invalid task array in deleteTaskRecursive');
                     return [];
                 }
                 
@@ -312,12 +401,10 @@
                 });
             };
 
-            // Delete task (main function)
             const deleteTask = (taskId) => {
                 setTasks(prevTasks => deleteTaskRecursive(prevTasks, taskId));
             };
 
-            // Update task text
             const updateTaskText = (taskId, newText) => {
                 setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
@@ -325,7 +412,6 @@
                 })));
             };
 
-            // Update task time
             const updateTaskTime = (taskId, minutes) => {
                 setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
@@ -333,7 +419,6 @@
                 })));
             };
 
-            // Toggle collapse
             const toggleCollapse = (taskId) => {
                 setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
@@ -341,27 +426,20 @@
                 })));
             };
 
-            // Clear all data
-            const clearAllData = () => {
+            const clearAllData = async () => {
                 if (confirm('Are you sure you want to delete all tasks? This cannot be undone.')) {
                     setTasks([]);
                     setNextId(1);
-                    if (hasStorage) {
-                        try {
-                            localStorage.removeItem('hierarchicalTasks');
-                            localStorage.removeItem('hierarchicalTasksNextId');
-                        } catch (e) {
-                            console.error('Failed to clear localStorage:', e);
-                        }
+                    if (database) {
+                        await saveToFirebase([], 1);
                     }
                 }
             };
 
-            // Render a single task
+            // ==================== RENDER FUNCTIONS ====================
+
             const renderTask = (task, depth = 0) => {
-                // Safety check: ensure task is valid
                 if (!task || typeof task !== 'object' || typeof task.id === 'undefined') {
-                    console.error('Invalid task in renderTask:', task);
                     return null;
                 }
                 
@@ -375,7 +453,6 @@
                             className="flex items-center gap-2 py-2 px-3 hover:bg-gray-50 rounded group"
                             style={{ marginLeft: `${indent}px` }}
                         >
-                            {/* Collapse toggle */}
                             <button
                                 onClick={() => toggleCollapse(task.id)}
                                 className="w-5 h-5 flex items-center justify-center text-gray-400 hover:text-gray-600"
@@ -388,7 +465,6 @@
                                 )}
                             </button>
 
-                            {/* Task text input */}
                             <input
                                 type="text"
                                 value={task.text}
@@ -396,7 +472,6 @@
                                 className="flex-1 px-2 py-1 border border-transparent hover:border-gray-300 focus:border-blue-500 focus:outline-none rounded"
                             />
 
-                            {/* Time input */}
                             <div className="flex items-center gap-1">
                                 <Clock size={14} className="text-gray-400" />
                                 <input
@@ -410,14 +485,12 @@
                                 <span className="text-sm text-gray-500">m</span>
                             </div>
 
-                            {/* Total time display */}
                             {hasChildren && (
                                 <div className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-sm font-medium">
                                     Total: {formatTime(totalTime)}
                                 </div>
                             )}
 
-                            {/* Actions */}
                             <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                                 <button
                                     onClick={() => addTask(task)}
@@ -437,7 +510,6 @@
                             </div>
                         </div>
 
-                        {/* Render children */}
                         {hasChildren && !task.collapsed && depth < 10 && (
                             <div>
                                 {task.children
@@ -449,35 +521,86 @@
                 );
             };
 
-            // Calculate total project time
             const totalProjectTime = Array.isArray(tasks) 
                 ? tasks.reduce((sum, task) => sum + calculateTotalTime(task), 0)
                 : 0;
 
+            // Sync status badge
+            const SyncBadge = () => {
+                if (!isFirebaseConfigured) {
+                    return (
+                        <div className="flex items-center gap-2 px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full text-sm">
+                            <CloudOff size={16} />
+                            <span>Offline Mode</span>
+                        </div>
+                    );
+                }
+
+                switch(syncStatus) {
+                    case 'syncing':
+                        return (
+                            <div className="flex items-center gap-2 px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm">
+                                <Cloud size={16} className="animate-pulse" />
+                                <span>Syncing...</span>
+                            </div>
+                        );
+                    case 'synced':
+                        return (
+                            <div className="flex items-center gap-2 px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm">
+                                <Cloud size={16} />
+                                <span>Synced</span>
+                            </div>
+                        );
+                    case 'error':
+                        return (
+                            <div className="flex items-center gap-2 px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm">
+                                <CloudOff size={16} />
+                                <span>Sync Error</span>
+                            </div>
+                        );
+                    default:
+                        return (
+                            <div className="flex items-center gap-2 px-3 py-1 bg-gray-100 text-gray-800 rounded-full text-sm">
+                                <CloudOff size={16} />
+                                <span>Offline</span>
+                            </div>
+                        );
+                }
+            };
+
+            if (isLoading) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 flex items-center justify-center">
+                        <div className="text-center">
+                            <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+                            <p className="text-gray-600">Loading your tasks...</p>
+                        </div>
+                    </div>
+                );
+            }
+
             return (
                 <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
-                    {/* Save notification */}
-                    {saveNotification && hasStorage && (
+                    {saveNotification && (
                         <div className="fixed top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 animate-fade-in z-50">
                             <Save size={16} />
-                            <span>Saved automatically</span>
+                            <span>Saved!</span>
                         </div>
                     )}
 
-                    {/* Storage warning */}
-                    {!hasStorage && (
-                        <div className="fixed top-4 right-4 bg-yellow-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 z-50">
-                            <span className="text-sm">⚠️ Auto-save disabled (download to enable)</span>
+                    {!isFirebaseConfigured && (
+                        <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 md:w-96 bg-orange-500 text-white p-4 rounded-lg shadow-lg z-50">
+                            <p className="font-semibold">⚠️ Firebase Not Configured</p>
+                            <p className="text-sm mt-1">Add your Firebase config to enable cross-device sync</p>
                         </div>
                     )}
 
-                    {/* Install prompt for PWA */}
                     {installPrompt && !isInstalled && (
                         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 bg-blue-600 text-white p-4 rounded-lg shadow-2xl flex items-center gap-3 z-50 animate-slide-up">
                             <Download size={24} />
                             <div className="flex-1">
                                 <div className="font-semibold">Install Task Manager</div>
-                                <div className="text-sm text-blue-100">Add to your home screen for quick access</div>
+                                <div className="text-sm text-blue-100">Add to your home screen</div>
                             </div>
                             <button
                                 onClick={handleInstall}
@@ -494,7 +617,6 @@
                         </div>
                     )}
 
-                    {/* Installed badge */}
                     {isInstalled && (
                         <div className="fixed top-4 left-4 bg-green-500 text-white px-3 py-1 rounded-full text-sm font-medium z-50">
                             📱 Installed
@@ -502,16 +624,18 @@
                     )}
 
                     <div className="max-w-5xl mx-auto">
-                        {/* Header */}
                         <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                            <div className="flex items-center justify-between mb-4">
-                                <div>
+                            <div className="flex items-center justify-between mb-4 flex-wrap gap-4">
+                                <div className="flex-1">
                                     <h1 className="text-3xl font-bold text-gray-900">Hierarchical Task Manager</h1>
-                                    <p className="text-gray-600 mt-1">Organize tasks up to 5 levels deep with automatic time tracking</p>
+                                    <p className="text-gray-600 mt-1">Cross-device sync with Firebase</p>
                                 </div>
-                                <div className="text-right">
-                                    <div className="text-sm text-gray-500">Total Project Time</div>
-                                    <div className="text-3xl font-bold text-blue-600">{formatTime(totalProjectTime)}</div>
+                                <div className="flex items-center gap-4">
+                                    <SyncBadge />
+                                    <div className="text-right">
+                                        <div className="text-sm text-gray-500">Total Time</div>
+                                        <div className="text-3xl font-bold text-blue-600">{formatTime(totalProjectTime)}</div>
+                                    </div>
                                 </div>
                             </div>
                             
@@ -521,7 +645,7 @@
                                     className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
                                 >
                                     <Plus size={20} />
-                                    Add Top-Level Task
+                                    Add Task
                                 </button>
                                 
                                 <button
@@ -544,11 +668,10 @@
                             </div>
                         </div>
 
-                        {/* Task list */}
                         <div className="bg-white rounded-lg shadow-lg p-4">
                             {tasks.length === 0 ? (
                                 <div className="text-center py-12 text-gray-400">
-                                    <p className="text-lg">No tasks yet. Create your first task to get started!</p>
+                                    <p className="text-lg">No tasks yet. Create your first task!</p>
                                 </div>
                             ) : (
                                 <div>
@@ -559,17 +682,15 @@
                             )}
                         </div>
 
-                        {/* Instructions */}
                         <div className="mt-6 bg-white rounded-lg shadow p-4 text-sm text-gray-600">
-                            <h3 className="font-semibold text-gray-900 mb-2">How to use:</h3>
+                            <h3 className="font-semibold text-gray-900 mb-2">✨ Features:</h3>
                             <ul className="space-y-1 list-disc list-inside">
-                                <li>Click the + button to add subtasks (up to 5 levels deep)</li>
-                                <li>Enter time estimates in minutes for each task</li>
-                                <li>Parent tasks automatically sum up all subtask times</li>
-                                <li>Click the chevron to collapse/expand subtasks</li>
-                                <li>Hover over tasks to see action buttons</li>
-                                <li><strong>Install as PWA:</strong> On mobile, tap "Add to Home Screen" in Safari (iOS) or "Install" prompt (Android)</li>
-                                <li><strong>Desktop:</strong> Look for the install icon in your browser's address bar</li>
+                                <li>📱 Works across all your devices automatically</li>
+                                <li>🔄 Real-time sync - changes appear instantly everywhere</li>
+                                <li>📊 Up to 5 levels of task nesting</li>
+                                <li>⏱️ Automatic time tracking and rollup</li>
+                                <li>💾 Cloud backup with Firebase</li>
+                                <li>🌐 Install as PWA for app-like experience</li>
                             </ul>
                         </div>
                     </div>
@@ -577,86 +698,49 @@
             );
         };
 
-        // Render the app
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<HierarchicalTaskManager />);
     </script>
 
     <script>
-        // Register service worker for PWA
+        // Service worker for PWA
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
-                // Create service worker as a blob
                 const swCode = `
                     const CACHE_NAME = 'task-manager-v1';
-                    const urlsToCache = [
-                        '/',
-                    ];
-
                     self.addEventListener('install', (event) => {
-                        event.waitUntil(
-                            caches.open(CACHE_NAME)
-                                .then((cache) => cache.addAll(urlsToCache))
-                        );
+                        event.waitUntil(caches.open(CACHE_NAME));
                     });
-
                     self.addEventListener('fetch', (event) => {
                         event.respondWith(
                             caches.match(event.request)
                                 .then((response) => response || fetch(event.request))
                         );
                     });
-
-                    self.addEventListener('activate', (event) => {
-                        event.waitUntil(
-                            caches.keys().then((cacheNames) => {
-                                return Promise.all(
-                                    cacheNames.map((cacheName) => {
-                                        if (cacheName !== CACHE_NAME) {
-                                            return caches.delete(cacheName);
-                                        }
-                                    })
-                                );
-                            })
-                        );
-                    });
                 `;
-
                 const blob = new Blob([swCode], { type: 'application/javascript' });
                 const swUrl = URL.createObjectURL(blob);
-
-                navigator.serviceWorker.register(swUrl)
-                    .then(reg => console.log('Service Worker registered'))
-                    .catch(err => console.log('Service Worker registration failed:', err));
+                navigator.serviceWorker.register(swUrl);
             });
         }
 
-        // Create manifest dynamically
+        // Create manifest
         const manifest = {
             name: "Hierarchical Task Manager",
             short_name: "Tasks",
-            description: "Organize tasks with deep nesting and time tracking",
+            description: "Task manager with cross-device sync",
             start_url: window.location.pathname || "/",
             display: "standalone",
             background_color: "#ffffff",
             theme_color: "#2563eb",
-            orientation: "any",
             icons: [
                 {
                     src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%232563eb' width='192' height='192' rx='40'/><path d='M60 100 L85 125 L135 75' stroke='white' stroke-width='12' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>",
                     sizes: "192x192",
-                    type: "image/svg+xml",
-                    purpose: "any maskable"
-                },
-                {
-                    src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect fill='%232563eb' width='512' height='512' rx='100'/><path d='M160 260 L225 325 L360 190' stroke='white' stroke-width='30' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>",
-                    sizes: "512x512",
-                    type: "image/svg+xml",
-                    purpose: "any maskable"
+                    type: "image/svg+xml"
                 }
             ]
         };
-
         const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
         const manifestURL = URL.createObjectURL(manifestBlob);
         document.getElementById('manifest-placeholder').setAttribute('href', manifestURL);
