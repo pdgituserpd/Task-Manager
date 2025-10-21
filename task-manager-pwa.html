@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -203,11 +204,22 @@
 
             // Calculate total time for a task including all subtasks
             const calculateTotalTime = (task) => {
-                if (!task.children || task.children.length === 0) {
-                    return task.timeMinutes;
+                if (!task || typeof task !== 'object') {
+                    console.error('Invalid task in calculateTotalTime');
+                    return 0;
                 }
-                const childrenTime = task.children.reduce((sum, child) => sum + calculateTotalTime(child), 0);
-                return task.timeMinutes + childrenTime;
+                
+                const taskTime = typeof task.timeMinutes === 'number' ? task.timeMinutes : 0;
+                
+                if (!task.children || !Array.isArray(task.children) || task.children.length === 0) {
+                    return taskTime;
+                }
+                
+                const childrenTime = task.children.reduce((sum, child) => {
+                    return sum + calculateTotalTime(child);
+                }, 0);
+                
+                return taskTime + childrenTime;
             };
 
             // Format minutes to hours and minutes
@@ -222,6 +234,12 @@
 
             // Add a new task
             const addTask = (parentTask = null) => {
+                // Safety check: ensure parent has valid structure
+                if (parentTask && (!parentTask.children || !Array.isArray(parentTask.children))) {
+                    console.error('Parent task has invalid children structure');
+                    return;
+                }
+
                 const newTask = {
                     id: nextId,
                     text: 'New task',
@@ -231,69 +249,97 @@
                     children: []
                 };
                 
-                setNextId(nextId + 1);
+                setNextId(prev => prev + 1);
 
                 if (parentTask) {
-                    const updatedTasks = updateTaskRecursive(tasks, parentTask.id, (task) => ({
-                        ...task,
-                        children: [...task.children, newTask]
-                    }));
-                    setTasks(updatedTasks);
+                    setTasks(prevTasks => {
+                        const updated = updateTaskRecursive(prevTasks, parentTask.id, (task) => ({
+                            ...task,
+                            children: [...(task.children || []), newTask]
+                        }));
+                        return updated;
+                    });
                 } else {
-                    setTasks([...tasks, newTask]);
+                    setTasks(prevTasks => [...prevTasks, newTask]);
                 }
             };
 
             // Update task recursively
             const updateTaskRecursive = (taskArray, taskId, updateFn) => {
+                if (!Array.isArray(taskArray)) {
+                    console.error('Invalid task array in updateTaskRecursive');
+                    return [];
+                }
+                
                 return taskArray.map(task => {
+                    if (!task || typeof task !== 'object') {
+                        console.error('Invalid task object');
+                        return task;
+                    }
+                    
                     if (task.id === taskId) {
                         return updateFn(task);
                     }
-                    if (task.children && task.children.length > 0) {
+                    
+                    if (task.children && Array.isArray(task.children) && task.children.length > 0) {
                         return {
                             ...task,
                             children: updateTaskRecursive(task.children, taskId, updateFn)
                         };
                     }
+                    
                     return task;
                 });
             };
 
-            // Delete task
-            const deleteTask = (taskId, taskArray = tasks) => {
-                const filtered = taskArray.filter(task => task.id !== taskId).map(task => ({
-                    ...task,
-                    children: task.children ? deleteTask(taskId, task.children) : []
-                }));
-                setTasks(filtered);
+            // Delete task recursively (helper function)
+            const deleteTaskRecursive = (taskArray, taskId) => {
+                if (!Array.isArray(taskArray)) {
+                    console.error('Invalid task array in deleteTaskRecursive');
+                    return [];
+                }
+                
+                return taskArray.filter(task => task && task.id !== taskId).map(task => {
+                    if (!task || typeof task !== 'object') {
+                        return task;
+                    }
+                    
+                    return {
+                        ...task,
+                        children: task.children && Array.isArray(task.children) && task.children.length > 0
+                            ? deleteTaskRecursive(task.children, taskId)
+                            : []
+                    };
+                });
+            };
+
+            // Delete task (main function)
+            const deleteTask = (taskId) => {
+                setTasks(prevTasks => deleteTaskRecursive(prevTasks, taskId));
             };
 
             // Update task text
             const updateTaskText = (taskId, newText) => {
-                const updated = updateTaskRecursive(tasks, taskId, (task) => ({
+                setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
                     text: newText
-                }));
-                setTasks(updated);
+                })));
             };
 
             // Update task time
             const updateTaskTime = (taskId, minutes) => {
-                const updated = updateTaskRecursive(tasks, taskId, (task) => ({
+                setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
                     timeMinutes: Math.max(0, parseInt(minutes) || 0)
-                }));
-                setTasks(updated);
+                })));
             };
 
             // Toggle collapse
             const toggleCollapse = (taskId) => {
-                const updated = updateTaskRecursive(tasks, taskId, (task) => ({
+                setTasks(prevTasks => updateTaskRecursive(prevTasks, taskId, (task) => ({
                     ...task,
                     collapsed: !task.collapsed
-                }));
-                setTasks(updated);
+                })));
             };
 
             // Clear all data
@@ -314,8 +360,14 @@
 
             // Render a single task
             const renderTask = (task, depth = 0) => {
+                // Safety check: ensure task is valid
+                if (!task || typeof task !== 'object' || typeof task.id === 'undefined') {
+                    console.error('Invalid task in renderTask:', task);
+                    return null;
+                }
+                
                 const totalTime = calculateTotalTime(task);
-                const hasChildren = task.children && task.children.length > 0;
+                const hasChildren = task.children && Array.isArray(task.children) && task.children.length > 0;
                 const indent = depth * 24;
 
                 return (
@@ -387,9 +439,11 @@
                         </div>
 
                         {/* Render children */}
-                        {hasChildren && !task.collapsed && (
+                        {hasChildren && !task.collapsed && depth < 10 && (
                             <div>
-                                {task.children.map(child => renderTask(child, depth + 1))}
+                                {task.children
+                                    .filter(child => child && typeof child === 'object' && typeof child.id !== 'undefined')
+                                    .map(child => renderTask(child, depth + 1))}
                             </div>
                         )}
                     </div>
@@ -397,7 +451,9 @@
             };
 
             // Calculate total project time
-            const totalProjectTime = tasks.reduce((sum, task) => sum + calculateTotalTime(task), 0);
+            const totalProjectTime = Array.isArray(tasks) 
+                ? tasks.reduce((sum, task) => sum + calculateTotalTime(task), 0)
+                : 0;
 
             return (
                 <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-50 p-6">
@@ -497,7 +553,9 @@
                                 </div>
                             ) : (
                                 <div>
-                                    {tasks.map(task => renderTask(task, 0))}
+                                    {tasks
+                                        .filter(task => task && typeof task === 'object' && typeof task.id !== 'undefined')
+                                        .map(task => renderTask(task, 0))}
                                 </div>
                             )}
                         </div>
